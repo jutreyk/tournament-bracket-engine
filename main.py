@@ -148,8 +148,19 @@ db: Dict[str, Tournament] = {}
 
 app = FastAPI(title="Tournament Bracket Engine")
 
+class CreateTournamentRequest(BaseModel):
+    name: str = "Championship 2026"
+    participants: Optional[List[Participant]] = None
+
 @app.post("/api/v1/tournaments", status_code=201)
-async def create_tournament(name: str, participants: List[Participant]):
+async def create_tournament(req: Optional[CreateTournamentRequest] = None):
+    name = req.name if req and req.name else "Championship 2026"
+    participants = req.participants if req and req.participants else [
+        Participant(id="p1", name="Команда 1", seed=1),
+        Participant(id="p2", name="Команда 2", seed=2),
+        Participant(id="p3", name="Команда 3", seed=3),
+        Participant(id="p4", name="Команда 4", seed=4)
+    ]
     t_id = f"tour-{str(uuid.uuid4())[:8]}"
     tournament = BracketEngine.generate(t_id, name, participants)
     db[t_id] = tournament
