@@ -33,6 +33,157 @@ class Tournament(BaseModel):
     participants: List[Participant]
     matches: List[Match]
     is_completed: bool = False
+    format: str = "single_elimination"
+    current_round: int = 1
+    total_rounds: int = 1
+
+class SwissParticipantStats(BaseModel):
+    participant: Participant
+    points: float = 0.0
+    matches_played: int = 0
+    opponents: List[str] = []
+    had_bye: bool = False
+
+class SwissEngine:
+    @staticmethod
+    def calculate_total_rounds(n: int) -> int:
+        if n < 2:
+            return 1
+        return max(1, math.ceil(math.log2(n)))
+
+    @staticmethod
+    def build_standings(participants: List[Participant], matches: List[Match]) -> List[SwissParticipantStats]:
+        stats_map: Dict[str, SwissParticipantStats] = {
+            p.id: SwissParticipantStats(participant=p) for p in participants
+        }
+
+        for m in matches:
+            if m.status != MatchStatus.COMPLETED:
+                continue
+
+            if m.participant1 and not m.participant2:
+                stats_map[m.participant1.id].points += 1.0
+                stats_map[m.participant1.id].had_bye = True
+                continue
+
+            if not m.participant1 or not m.participant2:
+                continue
+
+            p1_id = m.participant1.id
+            p2_id = m.participant2.id
+
+            stats_map[p1_id].matches_played += 1
+            stats_map[p2_id].matches_played += 1
+            stats_map[p1_id].opponents.append(p2_id)
+            stats_map[p2_id].opponents.append(p1_id)
+
+            if m.winner_id == p1_id:
+                stats_map[p1_id].points += 1.0
+            elif m.winner_id == p2_id:
+                stats_map[p2_id].points += 1.0
+            else:
+                stats_map[p1_id].points += 0.5
+                stats_map[p2_id].points += 0.5
+
+        standings = list(stats_map.values())
+        standings.sort(key=lambda s: (-s.points, s.participant.seed))
+        return standings
+
+    @staticmethod
+    def pair_round(
+        tournament_id: str,
+        round_index: int,
+        participants: List[Participant],
+        previous_matches: List[Match]
+    ) -> List[Match]:
+        n = len(participants)
+        if n < 2:
+            raise ValueError("Минимум 2 участника")
+
+        standings = SwissEngine.build_standings(participants, previous_matches)
+        history: Dict[str, Set[str]] = {s.participant.id: set(s.opponents) for s in standings}
+        candidates = list(standings)
+        round_matches: List[Match] = []
+        match_counter = 1
+
+        if len(candidates) % 2 != 0:
+            bye_candidate = None
+            for cand in reversed(candidates):
+                if not cand.had_bye:
+                    bye_candidate = cand
+                    break
+            if not bye_candidate:
+                bye_candidate = candidates[-1]
+
+            candidates.remove(bye_candidate)
+            bye_match = Match(
+                id=f"{tournament_id}-R{round_index}-M{match_counter}",
+                round_index=round_index,
+                bracket_type="swiss",
+                participant1=bye_candidate.participant,
+                participant2=None,
+                score1=1,
+                score2=0,
+                winner_id=bye_candidate.participant.id,
+                status=MatchStatus.COMPLETED
+            )
+            round_matches.append(bye_match)
+            match_counter += 1
+
+        pairs = SwissEngine._match_pairs(candidates, history)
+        for p1, p2 in pairs:
+            m = Match(
+                id=f"{tournament_id}-R{round_index}-M{match_counter}",
+                round_index=round_index,
+                bracket_type="swiss",
+                participant1=p1.participant,
+                participant2=p2.participant,
+                score1=0,
+                score2=0,
+                status=MatchStatus.PENDING
+            )
+            round_matches.append(m)
+            match_counter += 1
+
+        return round_matches
+
+    @staticmethod
+    def _match_pairs(
+        candidates: List[SwissParticipantStats],
+        history: Dict[str, Set[str]]
+    ) -> List[tuple[SwissParticipantStats, SwissParticipantStats]]:
+        if not candidates:
+            return []
+
+        def backtrack(pool: List[SwissParticipantStats]) -> Optional[List[tuple[SwissParticipantStats, SwissParticipantStats]]]:
+            if not pool:
+                return []
+            first = pool[0]
+            rest = pool[1:]
+
+            for idx, opponent in enumerate(rest):
+                if opponent.participant.id not in history.get(first.participant.id, set()):
+                    remaining = rest[:idx] + rest[idx+1:]
+                    sub_solution = backtrack(remaining)
+                    if sub_solution is not None:
+                        return [(first, opponent)] + sub_solution
+
+            for idx, opponent in enumerate(rest):
+                remaining = rest[:idx] + rest[idx+1:]
+                sub_solution = backtrack(remaining)
+                if sub_solution is not None:
+                    return [(first, opponent)] + sub_solution
+
+            return None
+
+        result = backtrack(candidates)
+        if result is not None:
+            return result
+
+        fallback: List[tuple[SwissParticipantStats, SwissParticipantStats]] = []
+        for i in range(0, len(candidates), 2):
+            fallback.append((candidates[i], candidates[i+1]))
+        return fallback
 
 class BracketEngine:
     @staticmethod
